@@ -79,7 +79,7 @@ gfR2tab <- function(gfMods.list, alFreqs){
               nrow(tab)/nrow(gfMods.list[[i]]))
   tab <- data.frame(variable=vrNm, tab)
   tab <- dcast(tab, SNP~variable, value.var="imps")
-  envR2 <- rowSums(tab[,2:6])
+  envR2 <- rowSums(tab[,-1])
   R2Tab <- data.frame(tab, envR2=envR2)
   
   # get name of SNP if it has a positive R2
