@@ -1,5 +1,5 @@
 
-# Install / load libraries, etc ------------------------------------------------
+# Load libraries ---------------------------------------------------------------
 #library(devtools)
 #install_github("whitlock/OutFLANK")
 
@@ -12,13 +12,208 @@ library(doParallel)
 library(OutFLANK)
 library(pbapply)
 library(gdata)
-source("/Users/mfitzpatrick/code/plantGenome/FstByRowtoGDMmatrices.R")
-
-setwd("/Volumes/localDrobo/R.analyses/refugiaSimulations")
+library(data.table)
 ################################################################################
 
 
-# Load and prep data (x-y, env, allelic) ---------------------------------------
+# FUNCTIONS & SOURCED SCRIPTS --------------------------------------------------
+#gfOutObj <- setClass("gfOutObj", slots = c(alFreq="data.frame", imp="list"))
+
+source("/Users/mfitzpatrick/code/plantGenome/FstByRowtoGDMmatrices.R")
+
+#####
+# function to calculate pop-level allele counts / frequencies
+# alleleTab = input allele data
+# popSize = number of individuals sampled
+# numPops = number of locations sampled = nrow(geo)
+alleleDat <- function(alleleTab, popSize, numPops){
+  mat <- matrix(NA, nrow=numPops, ncol=ncol(alleleTab))
+  ind <- data.frame(i1=seq(1, popSize*numPops, by=popSize),
+                    i2=seq(0, popSize*numPops, by=popSize)[-1])
+  for(i in 1:numPops){
+    mat[i,] <- apply(alleleTab[ind[i,1]:ind[i,2],], 2, sum)
+  }
+  colnames(mat) <- colnames(alleleTab)
+  return(list(ifelse(1-(mat/popSize)<0.5, 1-(mat/popSize), mat/popSize), mat))}
+#####
+
+#####
+# function to create a matrix for each locus of the counts of each 
+# allele (columns) in each population (rows)
+buildMats <- function(counts, popSize){
+  bMat <- cbind(counts, popSize-counts)
+  return(bMat)}
+#####
+
+#####
+# function to calculate population pairwise Fst for a single locus
+pwFst <- function(tab, numPops, ind1, ind2){
+  mat <- matrix(0, numPops, numPops)
+  for(i in 1:length(ind1)){
+    mat[ind1[i], ind2[i]] <- WC_FST_FiniteSample_Haploids_2AllelesB_MCW(tab[c(ind1[i], ind2[i]),])[3]
+    mat[ind1[i], ind2[i]] <- ifelse(mat[ind1[i], ind2[i]]<0, 0, mat[ind1[i], ind2[i]])
+  }
+  return(upperTriangle(mat, diag=F))}
+#####
+
+#####
+# Function to add genetic distance to site-pair, remove NAs, and scale if desired.
+# Scaling can improve model fitting in some instances by increasing the range 
+# of Fst values.
+finalPrepFst <-  function(x, sitePair, scale=F){
+  fst <- sitePair 
+  fst$distance <- x
+  fst <- na.omit(fst)
+  if(scale==T){
+    return(scaleDist(fst)) # function sourced from above
+  } else {return(fst)}}
+#####
+
+#####
+# build output GF data frames
+gfR2tab <- function(gfMods.list, alFreqs){
+  i=1
+  while(is.null(gfMods.list[[i]])){i=i+1}
+  tab <- do.call(rbind, gfMods.list)
+  vrNm <- rep(row.names(tab)[1:nrow(gfMods.list[[i]])], 
+              nrow(tab)/nrow(gfMods.list[[i]]))
+  tab <- data.frame(variable=vrNm, tab)
+  tab <- dcast(tab, SNP~variable, value.var="imps")
+  envR2 <- rowSums(tab[,2:6])
+  R2Tab <- data.frame(tab, envR2=envR2)
+  
+  # get name of SNP if it has a positive R2
+  posR2 <- unlist(lapply(gfMods.list, function(x){
+    return(as.character(unique(x[,2])))}))
+  
+  # Find which loci have R2 < 0 (no GF model for those) & assign R2=0
+  negR2 <- !(colnames(alFreqs) %in% posR2)
+  negR2 <- colnames(alFreqs)[negR2] 
+  
+  noGF <- data.frame(matrix(0, nrow=length(negR2), ncol=ncol(R2Tab)))
+  colnames(noGF) <- colnames(R2Tab)           
+  noGF$SNP <- negR2
+  
+  R2Tab <- rbind(R2Tab, noGF)
+  snpID <- sapply(strsplit(as.character(R2Tab$SNP), "V"),function(x){as.numeric(x[2])})
+  R2Tab$SNP <- snpID
+  return(R2Tab[order(R2Tab$SNP),])}
+#####
+################################################################################
+
+
+# Load and prep data (env, allelic) ---------------------------------------
+# "background" environment
+bgEnv <- read.table(paste(getwd(),"/results_AdaptreeEnviFor_R90.txt", sep="")) 
+
+# sims
+simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
+simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function(x){
+  x[1]}), "/simfiles/", fixed=T), function(x){
+    x[2]}))
+
+# x-y and environment
+sim <- simFiles[grep(simIDs[9], simFiles)]
+envSelect <- read.table(sim[grep("env", sim)])
+names(envSelect) <- "envSelect"
+
+# allele data
+# columns = loci
+# rows = total # of individuals (#populations x #inds sampled)
+allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
+
+# data stats - used for indexing, etc
+popSize <- nrow(allelic)/nrow(bgEnv)
+numPops <- nrow(bgEnv)
+
+# build env table 
+envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
+                     envSelect=unique(envSelect), bgEnv[,8:27])
+
+# Calculate minor allele frequencies
+alFreq.x <- alleleDat(allelic, popSize, numPops)
+alFreq <- alFreq.x[[1]] # minor allele frequencies
+alCount <- alFreq.x[[2]] # allele counts
+rm(alFreq.x)
+
+# returns a list n loci long, each element is a 2-column matrix with 
+# major & minor allele counts
+locusMats <- lapply(1:ncol(alCount), function(x, tab){
+  buildMats(tab[,x], popSize)
+}, tab=alCount)
+
+# Minor allele frequencies using GF
+# gfAllele.freq <- gradientForest(data.frame(envPop, alFreq), 
+#                                 predictor.vars=colnames(envPop)[-c(1:3)],
+#                                 response.vars=colnames(alFreq), ntree=500, 
+#                                 trace=T)$result
+
+# fit gf model to each SNP individually
+cl <- makeCluster(12)
+registerDoParallel(cl)
+
+gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, .packages=c("gradientForest")) %dopar%{
+  locus <- data.frame(alFreq[,k])
+  names(locus) <- colnames(alFreq)[k]
+  gfLocus <- gradientForest(data.frame(envPop, locus), predictor.vars=colnames(envPop)[-c(1:3)], 
+                           response.vars=colnames(alFreq)[k], 
+                           corr.threshold=0.5, ntree=500, trace=F)
+  if(!is.null(gfLocus)){
+    imps <- importance(gfLocus)
+    imps <- imps[order(names(imps))]
+    data.frame(imps, SNP = colnames(alFreq)[k])
+  }
+}
+
+stopCluster(cl)
+#ttt <- gfOutObj(alFreq = data.frame(alFreq), imp = gfAllele.freq)
+
+# find outliers
+# table of importance values for each SNP (rows) and each var (columns)
+gfAllele.R2 <- gfR2tab(gfAllele.freq, alFreq)
+barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+
+write.csv(gfAllele.R2, paste("gfResults_", simIDs[9], ".csv", sep=""), row.names=F)
+
+
+# Now, calculate pairwise Fst values between all populations
+# Inefficient to do all possible pairs, so reduce to only unique
+allPairs <- expand.grid(1:numPops, 1:numPops)
+for(i in 1:nrow(allPairs)){
+  if(allPairs[i,1] > allPairs[i,2]){allPairs[i,] <- allPairs[i,c(2,1)]}
+}
+
+# find unique combinations of population indices
+uniqPairs <- unique(allPairs)
+ind1 <- uniqPairs[,1]
+ind2 <- uniqPairs[,2]
+
+# calculate population pairwise Fst for all loci
+Fst <- mclapply(locusMats, function(tab){pwFst(tab, numPops, ind1, ind2)},
+                mc.cores=12, mc.cleanup = T)
+
+# build site-pair tables needed for GDM
+# easier to start with fake data then add Fst values
+fstMat <- matrix(0, numPops, numPops)
+fstMat <- data.frame(popID=envPop$popID, fstMat)
+sitePair <- formatsitepair(bioData=fstMat, bioFormat=3, siteColumn="popID", 
+                           predData=envPop, XColumn="x", 
+                           YColumn="y")
+
+# create complete site-pair tables for all Fst matrices
+fstGDM <- pblapply(Fst, finalPrepFst, sitePair, scale=T)
+
+
+# Fst using GDM
+gdmMods <- mclapply(fstGDM, gdm, geo=F, mc.cores=12, mc.cleanup = T)
+
+
+
+
+
+# x-y and environment
+env <- read.table(sim[grep("env", sim)])
+
 sims <- c("1R_R90_1351142986_950_9_NumPops=90_NumInd=20", 
           "2R_R90_1351142986_950_10_NumPops=90_NumInd=20",
           "IBD_R90_1351142986_950_11_NumPops=90_NumInd=20", 
@@ -30,7 +225,7 @@ for(k in 1:length(sims)){
   # x-y and environment
   env <- read.table(simsFiles[grep("env", simsFiles)])
   names(env) <- "env"
-  geo <- read.table("SchemeRandom1.loc.txt")
+  geo <- read.table("/Volumes/localDrobo/Projects/activeProjects/testingTheTests/fitzLab-AL_TTT_LotterhosWhitlockData/SchemeRandom1.txt")
   geo <- geo[which(geo$R90==TRUE),]
   
   
@@ -47,8 +242,8 @@ for(k in 1:length(sims)){
   xC <- geo$X_Pops[sort(rep(1:numPops, popSize))]
   yC <- geo$Y_Pops[sort(rep(1:numPops, popSize))]
   env.ind <- data.frame(x=xC, y=yC, env=env)
-  env.pop <- unique(env.ind)
-  env.pop <- data.frame(popID=geo$PopID, env.pop)
+  envPop <- unique(env.ind)
+  envPop <- data.frame(popID=geo$PopID, envPop)
   
   # function to calculate pop-level allele counts / frequencies
   # alleleTab = input allele data
@@ -115,7 +310,7 @@ for(k in 1:length(sims)){
   # easier to start with fake data then add Fst values
   fstMat <- matrix(0, numPops, numPops) 
   sitePair <- formatsitepair(bioData=fstMat, bioFormat=3, siteColumn="popID", 
-                             predData=env.pop, XColumn="x", 
+                             predData=envPop, XColumn="x", 
                              YColumn="y")
   
   # loop to add genetic distance to site-pair, remove NAs, and scale if desired.
@@ -165,7 +360,7 @@ for(k in 1:length(sims)){
   stopCluster(cl)
   
   # Minor allele frequencies using GF
-  gfAllele.freq <- gradientForest(cbind(unique(env.pop), alFreq), predictor.vars=c("x", "y", "env"),
+  gfAllele.freq <- gradientForest(cbind(unique(envPop), alFreq), predictor.vars=c("x", "y", "env"),
                                   response.vars=colnames(alFreq), ntree=500, trace=T)$result
   
   # Fst using GDM
