@@ -112,68 +112,173 @@ simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
 
-# x-y and environment
-sim <- simFiles[grep(simIDs[9], simFiles)]
-envSelect <- read.table(sim[grep("env", sim)])
-names(envSelect) <- "envSelect"
-
-# allele data
-# columns = loci
-# rows = total # of individuals (#populations x #inds sampled)
-allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
-
-# data stats - used for indexing, etc
-popSize <- nrow(allelic)/nrow(bgEnv)
-numPops <- nrow(bgEnv)
-
-# build env table 
-envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
-                     envSelect=unique(envSelect), bgEnv[,8:27])
-
-# Calculate minor allele frequencies
-alFreq.x <- alleleDat(allelic, popSize, numPops)
-alFreq <- alFreq.x[[1]] # minor allele frequencies
-alCount <- alFreq.x[[2]] # allele counts
-rm(alFreq.x)
-
-# returns a list n loci long, each element is a 2-column matrix with 
-# major & minor allele counts
-locusMats <- lapply(1:ncol(alCount), function(x, tab){
-  buildMats(tab[,x], popSize)
-}, tab=alCount)
-
-# Minor allele frequencies using GF
-# gfAllele.freq <- gradientForest(data.frame(envPop, alFreq), 
-#                                 predictor.vars=colnames(envPop)[-c(1:3)],
-#                                 response.vars=colnames(alFreq), ntree=500, 
-#                                 trace=T)$result
-
-# fit gf model to each SNP individually
-cl <- makeCluster(12)
-registerDoParallel(cl)
-
-gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, .packages=c("gradientForest")) %dopar%{
-  locus <- data.frame(alFreq[,k])
-  names(locus) <- colnames(alFreq)[k]
-  gfLocus <- gradientForest(data.frame(envPop, locus), predictor.vars=colnames(envPop)[-c(1:3)], 
-                           response.vars=colnames(alFreq)[k], 
-                           corr.threshold=0.5, ntree=500, trace=F)
-  if(!is.null(gfLocus)){
-    imps <- importance(gfLocus)
-    imps <- imps[order(names(imps))]
-    data.frame(imps, SNP = colnames(alFreq)[k])
+# lapply through each simulation to prep data, run GF, and write results to file
+lapply(simIDs, function(simID){
+  # x-y and environment
+  sim <- simFiles[grep(simID, simFiles)]
+  #cpVal <- read.table(list.files(path=paste(getwd(), "/results", sep=""), 
+  #                               pattern=simID, full.names=T), header=T)
+  envSelect <- read.table(sim[grep("env", sim)])
+  names(envSelect) <- "envSelect"
+  
+  # allele data
+  # columns = loci
+  # rows = total # of individuals (#populations x #inds sampled)
+  allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
+  #allelic <- allelic[,cpVal$SNPIncluded]
+  
+  print(simID)
+  
+  # data stats - used for indexing, etc
+  popSize <- nrow(allelic)/nrow(bgEnv)
+  numPops <- nrow(bgEnv)
+  
+  # build env table 
+  envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
+                       envSelect=unique(envSelect), bgEnv[,8:27])
+  
+  # Calculate minor allele frequencies
+  alFreq.x <- alleleDat(allelic, popSize, numPops)
+  alFreq <- alFreq.x[[1]] # minor allele frequencies
+  alCount <- alFreq.x[[2]] # allele counts
+  rm(alFreq.x)
+  
+  # returns a list n loci long, each element is a 2-column matrix with 
+  # major & minor allele counts
+  locusMats <- lapply(1:ncol(alCount), function(x, tab){
+    buildMats(tab[,x], popSize)
+  }, tab=alCount)
+  
+  # Minor allele frequencies using GF
+  # gfAllele.freq <- gradientForest(data.frame(envPop, alFreq), 
+  #                                 predictor.vars=colnames(envPop)[-c(1:3)],
+  #                                 response.vars=colnames(alFreq), ntree=500, 
+  #                                 trace=T)$result
+  
+  # fit gf model to each SNP individually
+  cl <- makeCluster(12)
+  registerDoParallel(cl)
+  
+  gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, 
+                           .packages=c("gradientForest")) %dopar% {
+    locus <- data.frame(alFreq[,k])
+    names(locus) <- colnames(alFreq)[k]
+    gfLocus <- gradientForest(data.frame(envPop, locus),
+                              predictor.vars=colnames(envPop)[-c(1:3)], 
+                              response.vars=colnames(alFreq)[k], 
+                              corr.threshold=0.5, ntree=500, trace=F)
+    if(!is.null(gfLocus)){
+      imps <- importance(gfLocus)
+      imps <- imps[order(names(imps))]
+      data.frame(imps, SNP = colnames(alFreq)[k])
+    }
   }
-}
+  
+  stopCluster(cl)
+  #ttt <- gfOutObj(alFreq = data.frame(alFreq), imp = gfAllele.freq)
+  
+  # find outliers
+  # table of importance values for each SNP (rows) and each var (columns)
+  gfAllele.R2 <- gfR2tab(gfAllele.freq, alFreq)
+  barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+  
+  write.csv(gfAllele.R2, paste("gfResults_", simID, ".csv", sep=""), 
+            row.names=F)
+})
+################################################################################
 
-stopCluster(cl)
-#ttt <- gfOutObj(alFreq = data.frame(alFreq), imp = gfAllele.freq)
+ttt <- lapply(simIDs, function(simID){
+  gfResults <- read.csv(list.files(path=paste(getwd(), "/gradientForestResults", sep=""), 
+                                   pattern=simID, full.names = T))
+  ID <- 1:nrow(gfResults)
+  Observed <- c(rep(0, 9900), rep(1, (nrow(gfResults)-9900)))
+  Predicted <- gfResults$envSelect
+  pdf(file=paste(getwd(), "/gradientForestResults/AUC_", simID, ".pdf", sep=""), height = 8, width=9)
+  auc.roc.plot(data.frame(ID, Observed, Predicted), main=simID)
+  dev.off()
+})
+  
+fitzLab-AL_TTT_LotterhosWhitlockData/gradientForestResults/gfResults_1R_R90_1351142954_453_1.csv
 
-# find outliers
-# table of importance values for each SNP (rows) and each var (columns)
-gfAllele.R2 <- gfR2tab(gfAllele.freq, alFreq)
-barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+modResults <- read.csv(list.files(pattern=simIDs[1]))
 
-write.csv(gfAllele.R2, paste("gfResults_", simIDs[9], ".csv", sep=""), row.names=F)
+auc.roc.plot(data.frame(ID=1:nrow(modResults), Observed=c(rep(0, 9900), 
+                                                          rep(1, (nrow(modResults)-9900))),
+                        redicted=modResults$envSelect), main="junk")
+
+modResults <- read.csv(list.files(pattern=simIDs[1]))
+probs <- seq(0,1,0.01)
+
+quants <- quantile(modResults$envSelect, probs=probs)
+
+fnr <- sapply(quants, function(x){
+  inds <- 9900:length(modResults$envSelect)
+  negs <- sum(modResults$envSelect[inds]<x)
+  return(negs/length(inds))
+})
+
+fpr <- sapply(quants, function(x){
+  inds <- 1:9899
+  fpos <- sum(modResults$envSelect[inds]>=x)
+  return(fpos/length(inds))
+})
+
+plot(fpr, 1-fnr, type="l", col=)
+  
+  1-(test SNP rank/[number intergenic SNPs+1])
+
+# loop through each simulation and plot gf and gdm models
+for(k in 1:length(sims)){
+  modResults <- read.csv(list.files(pattern=simIDs[1]))
+  
+  # alpha to calculate false postives / false negatives
+  alpha <- seq(0, 0.1, 0.001)
+  quants <- quantile(modResults$envSelect, probs=probs)
+  
+  # false neg/pos rates at alpha = 0.01
+  fnrPlot <- sum(modResults$envSelect[9900:length(modResults$envSelect)] < quantile(gfAlfreq$R2, probs=0.99))/sum(gfAlfreq$ind>9900)
+  fprPlot <- sum(gfAlfreq$R2[gfAlfreq$ind<=9900] >= quantile(gfAlfreq$R2, probs=0.99))/sum(gfAlfreq$ind<=9900)
+  
+  fnr <- NULL
+  fpr <- NULL
+  for(w in 1:length(quants)){
+    fnr[w] <- sum(gfAlfreq$R2[gfAlfreq$ind>9900] < quants[w])/sum(gfAlfreq$ind>9900)
+    fpr[w] <- sum(gfAlfreq$R2[gfAlfreq$ind<=9900] >= quants[w])/sum(gfAlfreq$ind<=9900)
+  }
+  
+  errorRates[[k]][[2]] <- data.frame(fnr, fpr)
+  
+  # colors for plotting
+  bg <- (gfAlfreq$R2 >= quantile(gfAlfreq$R2, probs=0.99))+1
+  bg <- ifelse(bg==1, rgb(0,0,0,0.15), rgb(1,0,0,0.5))
+  bg[gfAlfreq$ind>9900] <- rgb(0,0,1,0.5)
+  
+  # plot & save 
+  filename <- paste("gf.allele.freq_", sims[k], ".tif", sep="")
+  tiff(file=filename, width=18, height=12, units="in", compression="lzw", res=150,
+       type="cairo")
+  
+  par(mai=c(1.25,1.25,1.25,1.25))
+  
+  col <- rgb(0,0,0,0.5)
+  
+  plot(gfAlfreq$R2, bg=bg, pch=21, xlab="locus", ylab=expression(R^2), cex.lab=3.5, 
+       cex.axis=2, col=col, ylim=c(0, 1), main="GF on minor allele frequencies", 
+       col.axis="grey50", cex.main=2)
+  
+  text(5000, 1, sims[k], cex=1.5)
+  text(2000, 0.8, paste("false negative rate =", round(fnrPlot, 3), sep=" "), cex=3) 
+  text(2000, 0.74, paste("false positive rate =", round(fprPlot, 4), sep=" "), cex=3)  
+  dev.off()
+  ####################
+
+
+
+
+
+
+
+
 
 
 # Now, calculate pairwise Fst values between all populations
