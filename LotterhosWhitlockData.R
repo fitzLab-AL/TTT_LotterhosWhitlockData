@@ -13,6 +13,7 @@ library(OutFLANK)
 library(pbapply)
 library(gdata)
 library(data.table)
+library(PresenceAbsence)
 ################################################################################
 
 
@@ -127,13 +128,20 @@ lapply(simIDs, function(simID){
   allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
   #allelic <- allelic[,cpVal$SNPIncluded]
   
-  print(simID)
+  print(paste("Minor allele freq", simID, sep="::"))
   
   # data stats - used for indexing, etc
   popSize <- nrow(allelic)/nrow(bgEnv)
   numPops <- nrow(bgEnv)
   
-  # build env table 
+  # build env table for individuals
+  envInd <- NULL
+  for(i in 1:popSize){envInd <- rbind(envInd, bgEnv)}
+  
+  envInd <- envInd[sort(envInd$PopID),c(1:3,8:27)]
+  envInd <- data.frame(envInd, envSelect)
+  
+  # build env table for populations 
   envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
                        envSelect=unique(envSelect), bgEnv[,8:27])
   
@@ -143,20 +151,9 @@ lapply(simIDs, function(simID){
   alCount <- alFreq.x[[2]] # allele counts
   rm(alFreq.x)
   
-  # returns a list n loci long, each element is a 2-column matrix with 
-  # major & minor allele counts
-  locusMats <- lapply(1:ncol(alCount), function(x, tab){
-    buildMats(tab[,x], popSize)
-  }, tab=alCount)
-  
   # Minor allele frequencies using GF
-  # gfAllele.freq <- gradientForest(data.frame(envPop, alFreq), 
-  #                                 predictor.vars=colnames(envPop)[-c(1:3)],
-  #                                 response.vars=colnames(alFreq), ntree=500, 
-  #                                 trace=T)$result
-  
   # fit gf model to each SNP individually
-  cl <- makeCluster(12)
+  cl <- makeCluster(11)
   registerDoParallel(cl)
   
   gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, 
@@ -180,25 +177,136 @@ lapply(simIDs, function(simID){
   # find outliers
   # table of importance values for each SNP (rows) and each var (columns)
   gfAllele.R2 <- gfR2tab(gfAllele.freq, alFreq)
-  barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+  #barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
   
-  write.csv(gfAllele.R2, paste("gfResults_", simID, ".csv", sep=""), 
+  write.csv(gfAllele.R2, paste(getwd(), "/gradientForestResults/gfResults_alleleFreq_", simID, ".csv", sep=""), 
             row.names=F)
+  
+  print(paste("Presence-Absence", simID, sep="::"))
+  
+  # Allele presence-absence using GF
+  # Need to change 0/1 to factor for classification (otherwise defaults to regression) 
+  allelic <- apply(allelic, 2, factor)
+  
+  # fit individual GF models by locus.
+  cl <- makeCluster(11)
+  registerDoParallel(cl)
+  
+  gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=T, .packages=c("gradientForest")) %dopar%{
+    locus <- data.frame(allelic[,k])
+    names(locus) <- colnames(allelic)[k]
+    
+    gfLocus <- gradientForest(data.frame(envInd, locus),
+                              predictor.vars=colnames(envInd)[-c(1:3)], 
+                              response.vars=colnames(allelic)[k], 
+                              corr.threshold=0.5, ntree=500, trace=T)
+    
+    if(!is.null(gfLocus)){
+      imps <- importance(gfLocus)
+      imps <- imps[order(names(imps))]
+      data.frame(imps, SNP = colnames(alFreq)[k])
+    }
+  }
+    
+  stopCluster(cl)
+  
+  # find outliers
+  # table of importance values for each SNP (rows) and each var (columns)
+  gfAllele.R2.pa <- gfR2tab(gfAllele.pa, alFreq)
+  #barplot(sort(apply(gfAllele.R2.pa[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+  
+  write.csv(gfAllele.R2.pa, paste(getwd(), "/gradientForestResults/gfResults_PresAbs_", simID, ".csv", sep=""), 
+            row.names=F)
+  
+  
 })
 ################################################################################
 
-ttt <- lapply(simIDs, function(simID){
-  gfResults <- read.csv(list.files(path=paste(getwd(), "/gradientForestResults", sep=""), 
-                                   pattern=simID, full.names = T))
-  ID <- 1:nrow(gfResults)
-  Observed <- c(rep(0, 9900), rep(1, (nrow(gfResults)-9900)))
-  Predicted <- gfResults$envSelect
-  pdf(file=paste(getwd(), "/gradientForestResults/AUC_", simID, ".pdf", sep=""), height = 8, width=9)
-  auc.roc.plot(data.frame(ID, Observed, Predicted), main=simID)
-  dev.off()
-})
+gfAUC <- function(simID, type=c("freq", "pa")){
+  require(PresenceAbsence)
   
-fitzLab-AL_TTT_LotterhosWhitlockData/gradientForestResults/gfResults_1R_R90_1351142954_453_1.csv
+  gfResults <- list.files(path=paste(getwd(), "/gradientForestResults", sep=""), 
+                          pattern=paste(simID, "csv", sep="."), full.names = T)
+  
+  if(type=="freq"){
+    gfResult <- read.csv(gfResults[grep("Freq", gfResults)])
+  } else {
+    gfResult <- read.csv(gfResults[grep("PresAbs", gfResults)])
+  }
+  
+  ID <- 1:nrow(gfResult)
+  Observed <- c(rep(0, 9900), rep(1, (nrow(gfResult)-9900)))
+  Predicted <- gfResult$envR2
+  pdf(file=paste(getwd(), "/gradientForestResults/", type, "_AUC_", simID, ".pdf", sep=""), height = 8, width=9)
+  auc.roc.plot(data.frame(ID, Observed, Predicted), main=paste(type, simID, sep="::"))
+  dev.off()
+}
+
+
+# sims
+simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
+simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function(x){
+  x[1]}), "/simfiles/", fixed=T), function(x){
+    x[2]}))
+
+
+
+sapply(simIDs, gfAUC, type="freq")
+sapply(simIDs, gfAUC, type="pa")
+
+
+
+
+
+# AUC ggplot function
+fun.auc.ggplot <- function(pred, obs, title){
+  
+  # pred = predicted values
+  # obs = observed values (truth)
+  # title = plot title
+  
+  # Run the AUC calculations
+  ROC_perf <- performance(prediction(pred,obs),"tpr","fpr")
+  ROC_sens <- performance(prediction(pred,obs),"sens","spec")
+  ROC_auc <- performance(prediction(pred,obs),"auc")
+  
+  # Make plot data
+  plotdat <- data.frame(FP=ROC_perf@x.values[[1]],TP=ROC_perf@y.values[[1]],CUT=ROC_perf@alpha.values[[1]],POINT=NA)
+  plotdat[unlist(lapply(seq(0,1,0.1),function(x){which.min(abs(plotdat$CUT-x))})),"POINT"] <- seq(0,1,0.1)
+  
+  # Plot the curve
+  ggplot(plotdat, aes(x=FP,y=TP)) + 
+    geom_abline(intercept=0,slope=1) +
+    geom_line(lwd=1) + 
+    geom_point(data=plotdat[!is.na(plotdat$POINT),], aes(x=FP,y=TP,fill=POINT), pch=21, size=3) +
+    #geom_text(data=plotdat[!is.na(plotdat$POINT),], aes(x=FP,y=TP,fill=POINT), label=seq(1,0,-0.1), hjust=1, vjust=0) +
+    scale_fill_gradientn("Threhsold Cutoff",colours=rainbow(14)[1:11]) +
+    scale_x_continuous("False Positive Rate", limits=c(0,1)) +
+    scale_y_continuous("True Positive Rate", limits=c(0,1)) +
+    geom_polygon(aes(x=X,y=Y), data=data.frame(X=c(0.7,1,1,0.7),Y=c(0,0,0.29,0.29)), fill="white") +
+    annotate("text",x=0.97,y=0.25,label=paste("Nselected = ",sum(obs==1),sep=""),hjust=1) +
+    annotate("text",x=0.97,y=0.20,label=paste("Nneutral = ",sum(obs==0),sep=""),hjust=1) +
+    annotate("text",x=0.97,y=0.15,label=paste("AUC = ",round(ROC_auc@y.values[[1]],digits=2),sep=""),hjust=1) +
+    annotate("text",x=0.97,y=0.10,label=paste("Sens = ",round(mean(as.data.frame(ROC_sens@y.values)[,1]),digits=2),sep=""),hjust=1) +
+    annotate("text",x=0.97,y=0.05,label=paste("Spec = ",round(mean(as.data.frame(ROC_sens@x.values)[,1]),digits=2),sep=""),hjust=1) +
+    theme(legend.position="none", plot.title=element_text(vjust=2)) +
+    ggtitle(title)
+}
+
+
+
+# Run the function
+fun.auc.ggplot(predictions, observations, "My AUC Plot")
+
+
+https://github.com/joyofdata/joyofdata-articles/blob/master/roc-auc/calculate_roc.R
+roc <- calculate_roc(predictions, 1, 2, n = 100)
+
+# https://github.com/joyofdata/joyofdata-articles/blob/master/roc-auc/plot_roc.R
+plot_roc(roc, 0.7, 1, 2)
+
+  
+
 
 modResults <- read.csv(list.files(pattern=simIDs[1]))
 
@@ -277,7 +385,11 @@ for(k in 1:length(sims)){
 
 
 
-
+  # returns a list n loci long, each element is a 2-column matrix with 
+  # major & minor allele counts
+  locusMats <- lapply(1:ncol(alCount), function(x, tab){
+    buildMats(tab[,x], popSize)
+  }, tab=alCount)
 
 
 
