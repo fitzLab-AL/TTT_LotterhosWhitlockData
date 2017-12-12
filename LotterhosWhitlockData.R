@@ -14,6 +14,8 @@ library(pbapply)
 library(gdata)
 library(data.table)
 library(PresenceAbsence)
+library(ROCR)
+library(modEvA)
 ################################################################################
 
 
@@ -221,101 +223,89 @@ lapply(simIDs, function(simID){
   
 })
 ################################################################################
-
-gfAUC <- function(simID, type=c("freq", "pa")){
-  require(PresenceAbsence)
-  
-  gfResults <- list.files(path=paste(getwd(), "/gradientForestResults", sep=""), 
-                          pattern=paste(simID, "csv", sep="."), full.names = T)
-  
-  if(type=="freq"){
-    gfResult <- read.csv(gfResults[grep("Freq", gfResults)])
-  } else {
-    gfResult <- read.csv(gfResults[grep("PresAbs", gfResults)])
-  }
-  
-  ID <- 1:nrow(gfResult)
-  Observed <- c(rep(0, 9900), rep(1, (nrow(gfResult)-9900)))
-  Predicted <- gfResult$envR2
-  pdf(file=paste(getwd(), "/gradientForestResults/", type, "_AUC_", simID, ".pdf", sep=""), height = 8, width=9)
-  auc.roc.plot(data.frame(ID, Observed, Predicted), main=paste(type, simID, sep="::"))
-  dev.off()
-}
-
-
 # sims
 simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
 simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function(x){
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
+simID <- simIDs[11]
 
 
-
-sapply(simIDs, gfAUC, type="freq")
-sapply(simIDs, gfAUC, type="pa")
-
-
-
-
-
-# AUC ggplot function
-fun.auc.ggplot <- function(pred, obs, title){
+gfAUC <- function(simID){
   
-  # pred = predicted values
-  # obs = observed values (truth)
-  # title = plot title
+  gfResults <- list.files(path=paste(getwd(), "/gradientForestResults", sep=""), 
+                          pattern=paste(simID, "csv", sep="."), full.names = T)
+
+  gfResult.freq <- read.csv(gfResults[grep("Freq", gfResults)])
+  gfResult.pa <- read.csv(gfResults[grep("PresAbs", gfResults)])
+  
+  Observed.freq <- c(rep(0, 9900), rep(1, (nrow(gfResult.freq)-9900)))
+  Predicted.freq <- gfResult.freq$envR2
+  
+  Observed.pa <- c(rep(0, 9900), rep(1, (nrow(gfResult.pa)-9900)))
+  Predicted.pa <- gfResult.pa$envR2
   
   # Run the AUC calculations
-  ROC_perf <- performance(prediction(pred,obs),"tpr","fpr")
-  ROC_sens <- performance(prediction(pred,obs),"sens","spec")
-  ROC_auc <- performance(prediction(pred,obs),"auc")
+  ROC_perf.pa <- performance(prediction(Predicted.pa, Observed.pa),"tpr","fpr")
+  ROC_sens.pa <- performance(prediction(Predicted.pa, Observed.pa),"sens","spec")
+  ROC_auc.pa <- performance(prediction(Predicted.pa, Observed.pa),"auc")
+  
+  ROC_perf.freq <- performance(prediction(Predicted.freq, Observed.freq),"tpr","fpr")
+  ROC_sens.freq <- performance(prediction(Predicted.freq, Observed.freq),"sens","spec")
+  ROC_auc.freq <- performance(prediction(Predicted.freq, Observed.freq),"auc")
   
   # Make plot data
-  plotdat <- data.frame(FP=ROC_perf@x.values[[1]],TP=ROC_perf@y.values[[1]],CUT=ROC_perf@alpha.values[[1]],POINT=NA)
-  plotdat[unlist(lapply(seq(0,1,0.1),function(x){which.min(abs(plotdat$CUT-x))})),"POINT"] <- seq(0,1,0.1)
+  plotDat.pa <- data.frame(FP=ROC_perf.pa@x.values[[1]], TP=ROC_perf.pa@y.values[[1]],
+                        CUT=ROC_perf.pa@alpha.values[[1]], POINT=NA, 
+                        AUC=ROC_auc.pa@y.values[[1]],
+                        Sens=ROC_sens.pa@y.values[[1]],
+                        Spec=ROC_sens.pa@x.values[[1]],
+                        type="Allele pres-abs")
+  plotDat.pa[unlist(lapply(c(1, 0.99, 0.95, 0.90),function(x){which.min(abs(plotDat.pa$CUT-x))})),"POINT"] <- c(1, 0.99, 0.95, 0.90)
+  
+  
+  plotDat.freq <- data.frame(FP=ROC_perf.freq@x.values[[1]], TP=ROC_perf.freq@y.values[[1]],
+                           CUT=ROC_perf.freq@alpha.values[[1]], POINT=NA, 
+                           AUC=ROC_auc.freq@y.values[[1]],
+                           Sens=ROC_sens.freq@y.values[[1]],
+                           Spec=ROC_sens.freq@x.values[[1]],
+                           type="Minor allele freq")
+  plotDat.freq[unlist(lapply(c(1, 0.99, 0.95, 0.90),function(x){which.min(abs(plotDat.freq$CUT-x))})),"POINT"] <- c(1, 0.99, 0.95, 0.90)
+  
+  plotDat <- rbind(plotDat.pa, plotDat.freq)
   
   # Plot the curve
-  ggplot(plotdat, aes(x=FP,y=TP)) + 
-    geom_abline(intercept=0,slope=1) +
+  ggplot(plotDat, aes(x=FP,y=TP,col=TP)) + 
+    scale_colour_gradientn("",colours=rainbow(14)[1:11]) + facet_grid(~type) +
+    geom_abline(intercept=0, slope=1) +
     geom_line(lwd=1) + 
-    geom_point(data=plotdat[!is.na(plotdat$POINT),], aes(x=FP,y=TP,fill=POINT), pch=21, size=3) +
-    #geom_text(data=plotdat[!is.na(plotdat$POINT),], aes(x=FP,y=TP,fill=POINT), label=seq(1,0,-0.1), hjust=1, vjust=0) +
-    scale_fill_gradientn("Threhsold Cutoff",colours=rainbow(14)[1:11]) +
+    #geom_point(data=plotDat[!is.na(plotDat$POINT),], aes(x=FP,y=TP,fill=POINT), pch=21, size=3, col="black") +
+    #geom_text(data=plotDat[!is.na(plotDat$POINT),], aes(x=FP,y=TP,fill=POINT), label=plotDat$POINT[!is.na(plotDat$POINT)], hjust=1, vjust=0, col="black") +
     scale_x_continuous("False Positive Rate", limits=c(0,1)) +
     scale_y_continuous("True Positive Rate", limits=c(0,1)) +
-    geom_polygon(aes(x=X,y=Y), data=data.frame(X=c(0.7,1,1,0.7),Y=c(0,0,0.29,0.29)), fill="white") +
-    annotate("text",x=0.97,y=0.25,label=paste("Nselected = ",sum(obs==1),sep=""),hjust=1) +
-    annotate("text",x=0.97,y=0.20,label=paste("Nneutral = ",sum(obs==0),sep=""),hjust=1) +
-    annotate("text",x=0.97,y=0.15,label=paste("AUC = ",round(ROC_auc@y.values[[1]],digits=2),sep=""),hjust=1) +
-    annotate("text",x=0.97,y=0.10,label=paste("Sens = ",round(mean(as.data.frame(ROC_sens@y.values)[,1]),digits=2),sep=""),hjust=1) +
-    annotate("text",x=0.97,y=0.05,label=paste("Spec = ",round(mean(as.data.frame(ROC_sens@x.values)[,1]),digits=2),sep=""),hjust=1) +
-    theme(legend.position="none", plot.title=element_text(vjust=2)) +
-    ggtitle(title)
+    theme(axis.text = element_text(size = 14),
+          axis.title = element_text(size = 18),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size=16),
+          strip.text = element_text(size=20)) +
+    scale_fill_gradientn("Threhsold Cutoff",colours=rainbow(14)[1:11]) +
+    geom_text(data=data.frame(x=c(0.8, 0.8), y=c(0.05, 0.05), 
+                              label=paste("AUC=", round(unique(plotDat$AUC), 3), sep=""), 
+                                   type=c("Allele pres-abs", "Minor allele freq")), 
+                   aes(x, y, label=label), inherit.aes=FALSE, size=8) +
+    ggtitle(simID) + 
+    theme(plot.title = element_text(hjust = 0.5))
+  ggsave(paste(getwd(), "/gradientForestResults/AUC_", simID, ".pdf", sep=""), 
+         width = 16, height = 10, units = "in", dpi=300)
 }
 
 
 
-# Run the function
-fun.auc.ggplot(predictions, observations, "My AUC Plot")
+sapply(simIDs, gfAUC)
 
 
-https://github.com/joyofdata/joyofdata-articles/blob/master/roc-auc/calculate_roc.R
-roc <- calculate_roc(predictions, 1, 2, n = 100)
-
-# https://github.com/joyofdata/joyofdata-articles/blob/master/roc-auc/plot_roc.R
-plot_roc(roc, 0.7, 1, 2)
-
-  
 
 
-modResults <- read.csv(list.files(pattern=simIDs[1]))
-
-auc.roc.plot(data.frame(ID=1:nrow(modResults), Observed=c(rep(0, 9900), 
-                                                          rep(1, (nrow(modResults)-9900))),
-                        redicted=modResults$envSelect), main="junk")
-
-modResults <- read.csv(list.files(pattern=simIDs[1]))
-probs <- seq(0,1,0.01)
 
 quants <- quantile(modResults$envSelect, probs=probs)
 
