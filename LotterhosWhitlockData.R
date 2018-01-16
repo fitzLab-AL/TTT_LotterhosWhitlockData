@@ -16,6 +16,9 @@ library(data.table)
 library(PresenceAbsence)
 library(ROCR)
 library(modEvA)
+library(ggplot2)
+library(grid)
+library(gridExtra)
 ################################################################################
 
 
@@ -160,18 +163,18 @@ lapply(simIDs, function(simID){
   
   gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, 
                            .packages=c("gradientForest")) %dopar% {
-    locus <- data.frame(alFreq[,k])
-    names(locus) <- colnames(alFreq)[k]
-    gfLocus <- gradientForest(data.frame(envPop, locus),
-                              predictor.vars=colnames(envPop)[-c(1:3)], 
-                              response.vars=colnames(alFreq)[k], 
-                              corr.threshold=0.5, ntree=500, trace=F)
-    if(!is.null(gfLocus)){
-      imps <- importance(gfLocus)
-      imps <- imps[order(names(imps))]
-      data.frame(imps, SNP = colnames(alFreq)[k])
-    }
-  }
+                             locus <- data.frame(alFreq[,k])
+                             names(locus) <- colnames(alFreq)[k]
+                             gfLocus <- gradientForest(data.frame(envPop, locus),
+                                                       predictor.vars=colnames(envPop)[-c(1:3)], 
+                                                       response.vars=colnames(alFreq)[k], 
+                                                       corr.threshold=0.5, ntree=500, trace=F)
+                             if(!is.null(gfLocus)){
+                               imps <- importance(gfLocus)
+                               imps <- imps[order(names(imps))]
+                               data.frame(imps, SNP = colnames(alFreq)[k])
+                             }
+                           }
   
   stopCluster(cl)
   #ttt <- gfOutObj(alFreq = data.frame(alFreq), imp = gfAllele.freq)
@@ -209,7 +212,7 @@ lapply(simIDs, function(simID){
       data.frame(imps, SNP = colnames(alFreq)[k])
     }
   }
-    
+  
   stopCluster(cl)
   
   # find outliers
@@ -220,8 +223,192 @@ lapply(simIDs, function(simID){
   write.csv(gfAllele.R2.pa, paste(getwd(), "/gradientForestResults/gfResults_PresAbs_", simID, ".csv", sep=""), 
             row.names=F)
   
+  ########### Fit all alleles for plotting ######################
+  # gfPA <- gradientForest(data.frame(envInd, allelic),
+  #                        predictor.vars="envSelect", 
+  #                        response.vars=colnames(allelic), 
+  #                        corr.threshold=0.5, ntree=500, trace=T)
   
+  # gfMAF <- gradientForest(data.frame(envPop, alFreq),
+  #                           predictor.vars="envSelect", 
+  #                           response.vars=colnames(alFreq), 
+  #                           corr.threshold=0.5, ntree=500, trace=T)
+  
+  cl <- makeCluster(12)
+  registerDoParallel(cl)
+  
+  gfMAF <- foreach(k=1:ncol(alFreq), .verbose=F, 
+                   .packages=c("gradientForest", "data.table")) %dopar% {
+                     locus <- data.frame(alFreq[,k])
+                     names(locus) <- colnames(alFreq)[k]
+                     gfLocus <- gradientForest(data.frame(envPop, locus),
+                                               predictor.vars=colnames(envPop)[-c(1:3)], 
+                                               response.vars=colnames(alFreq)[k], 
+                                               corr.threshold=0.5, ntree=500, trace=F)
+                     if(!is.null(gfLocus)){
+                       cImp <- cumimp(gfLocus, "envSelect", type="Species")
+                       data.frame(rbindlist(cImp, idcol="allele"))
+                     }
+                   }
+  
+  gfPA <- foreach(k=1:ncol(alFreq), .verbose=F, 
+                  .packages=c("gradientForest", "data.table")) %dopar% {
+                    locus <- data.frame(allelic[,k])
+                    names(locus) <- colnames(allelic)[k]
+                    
+                    gfLocus <- gradientForest(data.frame(envInd, locus),
+                                              predictor.vars=colnames(envInd)[-c(1:3)], 
+                                              response.vars=colnames(allelic)[k], 
+                                              corr.threshold=0.5, ntree=500, trace=T)
+                    if(!is.null(gfLocus)){
+                      cImp <- cumimp(gfLocus, "envSelect", type="Species")
+                      data.frame(rbindlist(cImp, idcol="allele"))
+                    }
+                  }
+  
+  stopCluster(cl)
+  
+  ##### plot cImp for MAF models #####
+  impDatList <- gfMAF[unlist(lapply(gfMAF, function(x){!is.null(x)}))]
+  impDat <- do.call(rbind, impDatList)
+  # extract cumlative importance values
+  #impDat <- cumimp(gfMAF, "envSelect", type="Species")
+  # SNPs w/o a GF model (R2 < 0)
+  noGF_SNPs <- colnames(allelic)[-which(colnames(allelic) %in% unique(impDat$allele))]
+  
+  #ttt <- data.frame(rbindlist(impDat, idcol="allele"))
+  ttt <- data.frame(impDat, colorSNP="black")
+  
+  x <- sort(unique(envSelect)[,1])
+  nnn <- replicate(length(noGF_SNPs), list(x=x, y=rep(0,length(x)),
+                                           colorSNP=rep("black", length(x))), simplify = F)
+  names(nnn) <- noGF_SNPs
+  nnn <- data.frame(rbindlist(nnn, idcol="allele"))
+  
+  ggCand <- rbind(ttt, nnn)
+  
+  ggCand$colorSNP <- as.character(ggCand$colorSNP)
+  ggCand$colorSNP[ggCand$allele %in% paste("V", 9900:10000, sep="")] <- "red"
+  
+  maxs <- NULL
+  maxs[1] <- max(impDatList[[1]]$y)
+  for(j in 2:length(impDatList)){
+    maxs[j] <- max(impDatList[[j]]$y)    
+  }
+  maxs <- c(maxs, rep(0, length(noGF_SNPs)))
+  
+  black <- subset(ggCand, colorSNP=="black")
+  red <- subset(ggCand, colorSNP=="red")
+  
+  p.imp <- ggplot() + geom_line(data=black, aes(x=x, y=y, group=allele),
+                                colour=rgb(0,0,0,0.4), lwd=0.5) +
+    geom_line(data=red, aes(x=x, y=y, group=allele),
+              colour=rgb(1,0,0,0.4), lwd=0.5) +
+    labs(y="Cumulative Importance", x="Environment") +
+    
+    #ylim(0, max(maxs)*1.2) +
+    theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
+          axis.title.x = element_text(size=24)) + 
+    theme(axis.text.y = element_text(size = 16, colour = "grey60"), 
+          axis.title.y = element_text(size=24, vjust=1))
+  
+  p.hist <- ggplot() + geom_histogram(aes(maxs), binwidth=0.004) +
+    #xlim(0, 0.6) + 
+    labs(y = "Number of SNPs", x = "") + coord_flip() + 
+    theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) +  
+    theme_bw() + 
+    theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
+          axis.title.x = element_text(size=24)) + 
+    theme(axis.text.y = element_text(size = 0, colour = "grey60"), 
+          axis.title.y = element_text(size=0))
+  
+  gA <- ggplotGrob(p.imp)
+  gB <- ggplotGrob(p.hist)
+  gA.heights <- gA$heights 
+  gB.heights <- gB$heights
+  max.heights <- unit.pmax(gA.heights, gB.heights)
+  gA$heights <- max.heights 
+  gB$heights <- max.heights
+  titleGF <- textGrob(simID, gp=gpar(fontface="bold"))
+  grid.arrange(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
+  g <- arrangeGrob(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
+  
+  ggsave(paste(getwd(), "/gradientForestResults/MAF_cImp_", simID, ".pdf", sep=""), 
+         width = 16, height = 10, units = "in", dpi=300, g)
+  
+  ##### plot cImp for PAF models #####
+  impDatList <- gfPA[unlist(lapply(gfPA, function(x){!is.null(x)}))]
+  impDat <- do.call(rbind, impDatList)
+  # extract cumlative importance values
+  #impDat <- cumimp(gfPA, "envSelect", type="Species")
+  # SNPs w/o a GF model (R2 < 0)
+  noGF_SNPs <- colnames(allelic)[-which(colnames(allelic) %in% unique(impDat$allele))]
+  
+  #ttt <- data.frame(rbindlist(impDat, idcol="allele"))
+  ttt <- data.frame(impDat, colorSNP="black")
+  
+  x <- sort(unique(envSelect)[,1])
+  nnn <- replicate(length(noGF_SNPs), list(x=x, y=rep(0,length(x)),
+                                           colorSNP=rep("black", length(x))), simplify = F)
+  names(nnn) <- noGF_SNPs
+  nnn <- data.frame(rbindlist(nnn, idcol="allele"))
+  
+  ggCand <- rbind(ttt, nnn)
+  
+  ggCand$colorSNP <- as.character(ggCand$colorSNP)
+  ggCand$colorSNP[ggCand$allele %in% paste("V", 9900:10000, sep="")] <- "red"
+  
+  maxs <- NULL
+  maxs[1] <- max(impDatList[[1]]$y)
+  for(j in 2:length(impDatList)){
+    maxs[j] <- max(impDatList[[j]]$y)    
+  }
+  maxs <- c(maxs, rep(0, length(noGF_SNPs)))
+  
+  black <- subset(ggCand, colorSNP=="black")
+  red <- subset(ggCand, colorSNP=="red")
+  
+  p.imp <- ggplot() + geom_line(data=black, aes(x=x, y=y, group=allele),
+                                colour=rgb(0,0,0,0.4), lwd=0.5) +
+    geom_line(data=red, aes(x=x, y=y, group=allele),
+              colour=rgb(1,0,0,0.4), lwd=0.5) +
+    labs(y="Cumulative Importance", x="Environment") +
+    
+    #ylim(0, max(maxs)*1.2) +
+    theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
+          axis.title.x = element_text(size=24)) + 
+    theme(axis.text.y = element_text(size = 16, colour = "grey60"), 
+          axis.title.y = element_text(size=24, vjust=1))
+  
+  p.hist <- ggplot() + geom_histogram(aes(maxs), binwidth=0.004) +
+    #xlim(0, 0.6) + 
+    labs(y = "Number of SNPs", x = "") + coord_flip() + 
+    theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) +  
+    theme_bw() + 
+    theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
+          axis.title.x = element_text(size=24)) + 
+    theme(axis.text.y = element_text(size = 0, colour = "grey60"), 
+          axis.title.y = element_text(size=0))
+  
+  gA <- ggplotGrob(p.imp)
+  gB <- ggplotGrob(p.hist)
+  gA.heights <- gA$heights 
+  gB.heights <- gB$heights
+  max.heights <- unit.pmax(gA.heights, gB.heights)
+  gA$heights <- max.heights 
+  gB$heights <- max.heights
+  titleGF <- textGrob(simID, gp=gpar(fontface="bold"))
+  grid.arrange(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
+  g <- arrangeGrob(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
+  
+  ggsave(paste(getwd(), "/gradientForestResults/PA_cImp_", simID, ".pdf", sep=""), 
+         width = 16, height = 10, units = "in", dpi=300, g)
 })
+
 ################################################################################
 # sims
 simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
