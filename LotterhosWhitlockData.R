@@ -109,6 +109,8 @@ gfR2tab <- function(gfMods.list, alFreqs){
 
 
 # Load and prep data (env, allelic) ---------------------------------------
+cores <- 12
+
 # "background" environment
 bgEnv <- read.table(paste(getwd(),"/results_AdaptreeEnviFor_R90.txt", sep="")) 
 
@@ -118,7 +120,7 @@ simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
 
-#simID <- simIDs[2]
+#simID <- simIDs[1]
 
 # lapply through each simulation to prep data, run GF, and write results to file
 lapply(simIDs, function(simID){
@@ -141,175 +143,141 @@ lapply(simIDs, function(simID){
   snpID <- cpVal$SNPnames#paste("V", row.names(cpVal), sep="")
   names(allelic) <- snpID
   
-  print(paste("Minor allele freq", simID, sep="::"))
-  
   # data stats - used for indexing, etc
   popSize <- nrow(allelic)/nrow(bgEnv)
   numPops <- nrow(bgEnv)
   
-  # build env table for individuals
+  # build data tables for individuals & populations
   datInd <- data.frame(envSelect=envSelect, allelic)
-  datPop <- aggregate(. ~ envSelect, data=datInd, FUN=function(x, popSize){
-    alCount <- sum(x)
-    if(alCount>10){
-      return(1-alCount/popSize)
-    } else{return(alCount/popSize)}}, popSize=popSize)
+  datInd <- datInd[order(datInd$envSelect),]
+  allelic <- datInd[,-1]
   
   datPop <- aggregate(. ~ envSelect, data=datInd, FUN=function(x, popSize){
     sum(x)/popSize}, popSize=popSize)
-  
-  envInd <- envSelect
-  envPop <- data.frame(envSelect=datPop[,1])
-  allelic <- datInd[,-1]
   alFreq <- datPop[,-1]
+  envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops,
+                         envSelect=unique(envSelect), bgEnv[,8:27])
+  envPop <- envPop[order(envPop$envSelect),]
   
-  # envInd <- NULL
-  # for(i in 1:popSize){envInd <- rbind(envInd, bgEnv)}
-  # 
-  # envInd <- envInd[sort(envInd$PopID),c(1:3,8:27)]
-  # envInd <- data.frame(envInd, envSelect)
-  # 
-  # # build env table for populations 
-  # envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
-  #                      envSelect=unique(envSelect), bgEnv[,8:27])
-  # 
-  # # Calculate minor allele frequencies
-  # alFreq.x <- alleleDat(allelic, popSize, numPops)
-  # alFreq <- alFreq.x[[1]] # minor allele frequencies
-  # #alCount <- alFreq.x[[2]] # allele counts
-  # rm(alFreq.x)
+  envInd <- envPop[match(datInd$envSelect, envPop$envSelect),]
   
   # Minor allele frequencies using GF
   # fit gf model to each SNP individually
-  cl <- makeCluster(12)
+  print(paste("Minor allele freq", simID, sep="::"))
+  cl <- makeCluster(cores)
   registerDoParallel(cl)
   
-  gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, 
-                           .packages=c("gradientForest")) %dopar% {
+  gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, .packages=c("gradientForest", "data.table")) %dopar% {
                              locus <- data.frame(alFreq[,k])
                              names(locus) <- colnames(alFreq)[k]
-                             gfLocus <- gradientForest(data.frame(envPop, locus),
-                                                       predictor.vars=colnames(envPop), 
+                             
+                            gfLocus <- gradientForest(data.frame(envPop, locus),
+                                                       predictor.vars=colnames(envPop)[-c(1:3, 7:24)], 
                                                        response.vars=colnames(alFreq)[k], 
                                                        corr.threshold=0.5, ntree=500, trace=F)
                              if(!is.null(gfLocus)){
-                               imps <- importance(gfLocus)
-                               imps <- imps[order(names(imps))]
-                               data.frame(imps, SNP = colnames(alFreq)[k])
+                               cImp <- cumimp(gfLocus, "envSelect", type="Species")
+                               cImp <- data.frame(rbindlist(cImp, idcol="allele"))
+                               data.frame(cImp, r2=gfLocus$result)
                              }
                            }
-  
   stopCluster(cl)
-  #ttt <- gfOutObj(alFreq = data.frame(alFreq), imp = gfAllele.freq)
   
-  # find outliers
-  # table of importance values for each SNP (rows) and each var (columns)
-  gfAllele.R2 <- gfR2tab(gfAllele.freq, alFreq)
-  #barplot(sort(apply(gfAllele.R2[,-c(1,23)],2, mean), decreasing=F), horiz=T)
-  
-  write.csv(gfAllele.R2, paste(getwd(), "/gradientForestResults/gfResults_alleleFreq_", simID, ".csv", sep=""), 
-            row.names=F)
-  
+  # fit individual GF models by locus.
   print(paste("Presence-Absence", simID, sep="::"))
   
   # Allele presence-absence using GF
   # Need to change 0/1 to factor for classification (otherwise defaults to regression) 
   allelic <- apply(allelic, 2, factor)
   
-  # fit individual GF models by locus.
-  cl <- makeCluster(12)
+  cl <- makeCluster(cores)
   registerDoParallel(cl)
   
-  gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=T, .packages=c("gradientForest")) %dopar%{
-    locus <- data.frame(allelic[,k])
-    names(locus) <- colnames(allelic)[k]
-    dummyEnv <- rep(0, length(locus))
-    modDat <- data.frame(envInd, dummyEnv, locus)
-    gfLocus <- gradientForest(modDat, predictor.vars=c("envSelect", "dummyEnv"), 
-                              response.vars=colnames(allelic)[k], 
-                              corr.threshold=0.5, ntree=500, trace=T)
+  gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=F, .packages=c("gradientForest", "data.table")) %dopar%{
+                            locus <- data.frame(allelic[,k])
+                            names(locus) <- colnames(allelic)[k]
     
-    if(!is.null(gfLocus)){
-      imps <- importance(gfLocus)
-      imps <- imps[order(names(imps))]
-      data.frame(imps, SNP = colnames(allelic)[k])
-    }
-  }
-  
+                            gfLocus <- gradientForest(data.frame(envInd, locus),
+                                                      predictor.vars=colnames(envInd)[-c(1:3, 7:24)], 
+                                                      response.vars=colnames(allelic)[k], 
+                                                      corr.threshold=0.5, ntree=500, trace=F)
+    
+                              if(!is.null(gfLocus)){
+                                cImp <- cumimp(gfLocus, "envSelect", type="Species")
+                                cImp <- data.frame(rbindlist(cImp, idcol="allele"))
+                                data.frame(cImp, r2=gfLocus$result)
+                              }
+                            }
   stopCluster(cl)
   
-  # find outliers
+  # find outliers for Allele freq GFs
   # table of importance values for each SNP (rows) and each var (columns)
-  gfAllele.R2.pa <- gfR2tab(gfAllele.pa, alFreq)
-  #barplot(sort(apply(gfAllele.R2.pa[,-c(1,23)],2, mean), decreasing=F), horiz=T)
+  gfAF <- lapply(gfAllele.freq, function(x){
+    if(!is.null(x)){
+    ttt <- x[1,c("r2", "allele")]
+    return(data.frame(imps=ttt$r2, SNP=ttt$allele, row.names = "envSelect",
+                      stringsAsFactors=F))}})
+  
+  gfAllele.R2.af <- gfR2tab(gfAF, alFreq)
+  
+  write.csv(gfAllele.R2.af, paste(getwd(), "/gradientForestResults/gfResults_alleleFreq_", simID, ".csv", sep=""), 
+            row.names=F)
+  
+  # find outliers for Allele pres-abs GFs
+  # table of importance values for each SNP (rows) and each var (columns)
+  gfPA <- lapply(gfAllele.pa, function(x){
+    if(!is.null(x)){
+      ttt <- x[1, c("r2", "allele")]
+      return(data.frame(imps=ttt$r2, SNP=ttt$allele, row.names = "envSelect",
+                        stringsAsFactors=F))}})
+  
+  gfAllele.R2.pa <- gfR2tab(gfPA, alFreq)
   
   write.csv(gfAllele.R2.pa, paste(getwd(), "/gradientForestResults/gfResults_PresAbs_", simID, ".csv", sep=""), 
             row.names=F)
   
-  ########### Fit all alleles for plotting ######################
-  # gfPA <- gradientForest(data.frame(envInd, allelic),
-  #                        predictor.vars="envSelect", 
-  #                        response.vars=colnames(allelic), 
-  #                        corr.threshold=0.5, ntree=500, trace=T)
+  # cl <- makeCluster(cores)
+  # registerDoParallel(cl)
+  # 
+  # gfMAF <- foreach(k=1:ncol(alFreq), .verbose=F, 
+  #                  .packages=c("gradientForest", "data.table")) %dopar% {
+  #                    locus <- data.frame(alFreq[,k])
+  #                    names(locus) <- colnames(alFreq)[k]
+  #                    gfLocus <- gradientForest(data.frame(envPop, locus),
+  #                                              predictor.vars="envSelect", 
+  #                                              response.vars=colnames(alFreq)[k], 
+  #                                              corr.threshold=0.5, ntree=500, trace=F)
+  #                    if(!is.null(gfLocus)){
+  #                      cImp <- cumimp(gfLocus, "envSelect", type="Species")
+  #                      data.frame(rbindlist(cImp, idcol="allele"))
+  #                    }
+  #                  }
+  # 
+  # gfPA <- foreach(k=1:ncol(alFreq), .verbose=F, 
+  #                 .packages=c("gradientForest", "data.table")) %dopar% {
+  #                   locus <- data.frame(allelic[,k])
+  #                   names(locus) <- colnames(allelic)[k]
+  #                   
+  #                   gfLocus <- gradientForest(data.frame(envInd, locus),
+  #                                             predictor.vars="envSelect", 
+  #                                             response.vars=colnames(allelic)[k], 
+  #                                             corr.threshold=0.5, ntree=500, trace=F)
+  #                   if(!is.null(gfLocus)){
+  #                     cImp <- cumimp(gfLocus, "envSelect", type="Species")
+  #                     data.frame(rbindlist(cImp, idcol="allele"))
+  #                   }
+  #                 }
+  # 
+  # stopCluster(cl)
   
-  # gfMAF <- gradientForest(data.frame(envPop, alFreq),
-  #                           predictor.vars="envSelect", 
-  #                           response.vars=colnames(alFreq), 
-  #                           corr.threshold=0.5, ntree=500, trace=T)
-  
-  cl <- makeCluster(12)
-  registerDoParallel(cl)
-  
-  gfMAF <- foreach(k=1:ncol(alFreq), .verbose=F, 
-                   .packages=c("gradientForest", "data.table")) %dopar% {
-                     locus <- data.frame(alFreq[,k])
-                     names(locus) <- colnames(alFreq)[k]
-                     gfLocus <- gradientForest(data.frame(envPop, locus),
-                                               predictor.vars=colnames(envPop), 
-                                               response.vars=colnames(alFreq)[k], 
-                                               corr.threshold=0.5, ntree=500, trace=F)
-                     
-                     if(!is.null(gfLocus)){
-                       cImp <- cumimp(gfLocus, "envSelect", type="Species")
-                       data.frame(rbindlist(cImp, idcol="allele"))
-                     }
-                   }
-  
-  gfPA <- foreach(k=1:ncol(alFreq), .verbose=F, 
-                  .packages=c("gradientForest", "data.table")) %dopar% {
-                    locus <- data.frame(allelic[,k])
-                    names(locus) <- colnames(allelic)[k]
-                    dummyEnv <- rep(0, length(locus))
-                    modDat <- data.frame(envInd, dummyEnv, locus)
-                    gfLocus <- gradientForest(modDat, predictor.vars=c("envSelect", "dummyEnv"), 
-                                              response.vars=colnames(allelic)[k], 
-                                              corr.threshold=0.5, ntree=500, trace=T)
-                    if(!is.null(gfLocus)){
-                      cImp <- cumimp(gfLocus, "envSelect", type="Species")
-                      data.frame(rbindlist(cImp, idcol="allele"))
-                    }
-                  }
-  
-  stopCluster(cl)
   
   ##### plot cImp for MAF models #####
-  impDatList <- gfMAF[unlist(lapply(gfMAF, function(x){!is.null(x)}))]
+  impDatList <- gfAllele.freq[unlist(lapply(gfAllele.freq, function(x){!is.null(x)}))]
   impDat <- do.call(rbind, impDatList)
-  # extract cumlative importance values
-  #impDat <- cumimp(gfMAF, "envSelect", type="Species")
-  # SNPs w/o a GF model (R2 < 0)
-  #noGF_SNPs <- colnames(allelic)[-which(colnames(allelic) %in% unique(impDat$allele))]
-  
-  #ttt <- data.frame(rbindlist(impDat, idcol="allele"))
-  #ttt <- data.frame(impDat, colorSNP="black")
   
   x <- sort(unique(envSelect)[,1])
-  # nnn <- replicate(length(noGF_SNPs), list(x=x, y=rep(0,length(x)),
-  #                                          colorSNP=rep("black", length(x))), simplify = F)
-  # names(nnn) <- noGF_SNPs
-  # nnn <- data.frame(rbindlist(nnn, idcol="allele"))
   
-  ggCand <- impDat #rbind(ttt, nnn)
+  ggCand <- impDat 
   strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
   
   ggCand <- data.frame(ggCand, strSel)
@@ -317,57 +285,11 @@ lapply(simIDs, function(simID){
   snpID[cpVal$IsNeut=="Sel"]
   ggCand <- data.frame(ggCand, isNeut=as.character(cpVal$IsNeut[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))]))
   
-  #ggCand$colorSNP <- as.character(ggCand$colorSNP)
-  #ggCand$colorSNP[ggCand$allele %in% paste("V", 9900:10000, sep="")] <- "red"
-  
-  maxs <- NULL
+   maxs <- NULL
   maxs[1] <- max(impDatList[[1]]$y)
   for(j in 2:length(impDatList)){
     maxs[j] <- max(impDatList[[j]]$y)    
   }
-  #maxs <- c(maxs, rep(0, length(noGF_SNPs)))
-  
-  #black <- subset(ggCand, colorSNP=="black")
-  #red <- subset(ggCand, colorSNP=="red")
-  
-  # p.imp <- ggplot() + geom_line(data=black, aes(x=x, y=y, group=allele),
-  #                               colour=rgb(0,0,0,0.4), lwd=0.5) +
-  #   geom_line(data=red, aes(x=x, y=y, group=allele),
-  #             colour=rgb(1,0,0,0.4), lwd=0.5) +
-  #   labs(y="Cumulative Importance", x="Environment") +
-  #   
-  #   #ylim(0, max(maxs)*1.2) +
-  #   theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) + 
-  #   theme_bw() + 
-  #   theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
-  #         axis.title.x = element_text(size=24)) + 
-  #   theme(axis.text.y = element_text(size = 16, colour = "grey60"), 
-  #         axis.title.y = element_text(size=24, vjust=1))
-  # 
-  # p.hist <- ggplot() + geom_histogram(aes(maxs), binwidth=0.004) +
-  #   #xlim(0, 0.6) + 
-  #   labs(y = "Number of SNPs", x = "") + coord_flip() + 
-  #   theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) +  
-  #   theme_bw() + 
-  #   theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
-  #         axis.title.x = element_text(size=24)) + 
-  #   theme(axis.text.y = element_text(size = 0, colour = "grey60"), 
-  #         axis.title.y = element_text(size=0))
-  # 
-  # gA <- ggplotGrob(p.imp)
-  # gB <- ggplotGrob(p.hist)
-  # gA.heights <- gA$heights 
-  # gB.heights <- gB$heights
-  # max.heights <- unit.pmax(gA.heights, gB.heights)
-  # gA$heights <- max.heights 
-  # gB$heights <- max.heights
-  # titleGF <- textGrob(simID, gp=gpar(fontface="bold"))
-  # grid.arrange(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
-  # g <- arrangeGrob(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
-  # 
-  # ggsave(paste(getwd(), "/gradientForestResults/PA_cImp_", simID, ".pdf", sep=""), 
-  #        width = 16, height = 10, units = "in", dpi=300, g)
-  
   
   p.imp <- ggplot() + geom_line(data=ggCand, aes(x=x, y=y, group=allele),
                                 colour=rgb(0,0,0,0.4), lwd=0.5) + 
@@ -383,25 +305,14 @@ lapply(simIDs, function(simID){
           axis.title.y = element_text(size=24, vjust=1)) + 
     theme(strip.text = element_text(size=16))
   
-  ggsave(paste(getwd(), "/gradientForestResults/facetPA_cImp_", simID, ".pdf", sep=""), 
+  ggsave(paste(getwd(), "/gradientForestResults/facetMAF_cImp_", simID, ".pdf", sep=""), 
          width = 16, height = 10, units = "in", dpi=300, p.imp)
   
   ##### plot cImp for PAF models #####
-  impDatList <- gfPA[unlist(lapply(gfPA, function(x){!is.null(x)}))]
+  impDatList <- gfAllele.pa[unlist(lapply(gfAllele.pa, function(x){!is.null(x)}))]
   impDat <- do.call(rbind, impDatList)
-  # extract cumlative importance values
-  #impDat <- cumimp(gfPA, "envSelect", type="Species")
-  # SNPs w/o a GF model (R2 < 0)
-  #noGF_SNPs <- colnames(allelic)[-which(colnames(allelic) %in% unique(impDat$allele))]
-  
-  #ttt <- data.frame(rbindlist(impDat, idcol="allele"))
-  #ttt <- data.frame(impDat, colorSNP="black")
   
   x <- sort(unique(envSelect)[,1])
-  # nnn <- replicate(length(noGF_SNPs), list(x=x, y=rep(0,length(x)),
-  #                                          colorSNP=rep("black", length(x))), simplify = F)
-  # names(nnn) <- noGF_SNPs
-  # nnn <- data.frame(rbindlist(nnn, idcol="allele"))
   
   ggCand <- impDat #rbind(ttt, nnn)
   strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
@@ -419,49 +330,6 @@ lapply(simIDs, function(simID){
   for(j in 2:length(impDatList)){
     maxs[j] <- max(impDatList[[j]]$y)    
   }
-  #maxs <- c(maxs, rep(0, length(noGF_SNPs)))
-  
-  #black <- subset(ggCand, colorSNP=="black")
-  #red <- subset(ggCand, colorSNP=="red")
-  
-  # p.imp <- ggplot() + geom_line(data=black, aes(x=x, y=y, group=allele),
-  #                               colour=rgb(0,0,0,0.4), lwd=0.5) +
-  #   geom_line(data=red, aes(x=x, y=y, group=allele),
-  #             colour=rgb(1,0,0,0.4), lwd=0.5) +
-  #   labs(y="Cumulative Importance", x="Environment") +
-  #   
-  #   #ylim(0, max(maxs)*1.2) +
-  #   theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) + 
-  #   theme_bw() + 
-  #   theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
-  #         axis.title.x = element_text(size=24)) + 
-  #   theme(axis.text.y = element_text(size = 16, colour = "grey60"), 
-  #         axis.title.y = element_text(size=24, vjust=1))
-  # 
-  # p.hist <- ggplot() + geom_histogram(aes(maxs), binwidth=0.004) +
-  #   #xlim(0, 0.6) + 
-  #   labs(y = "Number of SNPs", x = "") + coord_flip() + 
-  #   theme(plot.margin = unit(c(1.25,1.25,1.25,1.25), "in")) +  
-  #   theme_bw() + 
-  #   theme(axis.text.x = element_text(size = 18, colour = "grey60"), 
-  #         axis.title.x = element_text(size=24)) + 
-  #   theme(axis.text.y = element_text(size = 0, colour = "grey60"), 
-  #         axis.title.y = element_text(size=0))
-  # 
-  # gA <- ggplotGrob(p.imp)
-  # gB <- ggplotGrob(p.hist)
-  # gA.heights <- gA$heights 
-  # gB.heights <- gB$heights
-  # max.heights <- unit.pmax(gA.heights, gB.heights)
-  # gA$heights <- max.heights 
-  # gB$heights <- max.heights
-  # titleGF <- textGrob(simID, gp=gpar(fontface="bold"))
-  # grid.arrange(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
-  # g <- arrangeGrob(gA, gB, ncol=2, widths=c(5/8, 3/8), top=titleGF)
-  # 
-  # ggsave(paste(getwd(), "/gradientForestResults/PA_cImp_", simID, ".pdf", sep=""), 
-  #        width = 16, height = 10, units = "in", dpi=300, g)
-  
   
   p.imp <- ggplot() + geom_line(data=ggCand, aes(x=x, y=y, group=allele),
                                 colour=rgb(0,0,0,0.4), lwd=0.5) + 
@@ -479,8 +347,9 @@ lapply(simIDs, function(simID){
   
   ggsave(paste(getwd(), "/gradientForestResults/facetPA_cImp_", simID, ".pdf", sep=""), 
                  width = 16, height = 10, units = "in", dpi=300, p.imp)
-  
 })
+################################################################################
+
 
 ################################################################################
 # sims
@@ -489,7 +358,6 @@ simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
 simID <- simIDs[11]
-
 
 gfAUC <- function(simID){
   
@@ -657,7 +525,7 @@ ind2 <- uniqPairs[,2]
 
 # calculate population pairwise Fst for all loci
 Fst <- mclapply(locusMats, function(tab){pwFst(tab, numPops, ind1, ind2)},
-                mc.cores=12, mc.cleanup = T)
+                mc.cores=cores, mc.cleanup = T)
 
 # build site-pair tables needed for GDM
 # easier to start with fake data then add Fst values
@@ -672,7 +540,7 @@ fstGDM <- pblapply(Fst, finalPrepFst, sitePair, scale=T)
 
 
 # Fst using GDM
-gdmMods <- mclapply(fstGDM, gdm, geo=F, mc.cores=12, mc.cleanup = T)
+gdmMods <- mclapply(fstGDM, gdm, geo=F, mc.cores=cores, mc.cleanup = T)
 
 
 
@@ -818,17 +686,17 @@ for(k in 1:length(sims)){
   cl <- makeCluster(10)
   registerDoParallel(cl)
   
-  gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=T, .packages=c("gradientForest")) %dopar%{
+  gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=F, .packages=c("gradientForest")) %dopar%{
     locus <- data.frame(allelic[,k])
     names(locus) <- colnames(allelic)[k]
     gradientForest(data.frame(env.ind, locus), predictor.vars=c("x", "y", "env"),
-                   response.vars=colnames(allelic)[k], ntree=500, trace=T)$result}
+                   response.vars=colnames(allelic)[k], ntree=500, trace=F)$result}
   
   stopCluster(cl)
   
   # Minor allele frequencies using GF
   gfAllele.freq <- gradientForest(cbind(unique(envPop), alFreq), predictor.vars=c("x", "y", "env"),
-                                  response.vars=colnames(alFreq), ntree=500, trace=T)$result
+                                  response.vars=colnames(alFreq), ntree=500, trace=F)$result
   
   # Fst using GDM
   gdmMods <- pblapply(fstGDM, gdm, geo=T)
@@ -1122,7 +990,7 @@ gfSims <- function(simDat, nTree){
   gfMod <- gradientForest(data.frame(preds, allelic), 
                           predictor.vars=c("P1", "junk"),
                         response.vars=colnames(allelic), 
-                        ntree=nTree, trace=T)
+                        ntree=nTree, trace=F)
   
   gf.cumImp <- cumimp(gfMod, "P1", type="Species")
   
@@ -1171,7 +1039,7 @@ for(k in 1:length(simsDat)){
   gfMod <- gradientForest(data.frame(preds, allelic), 
                           predictor.vars=c("P1", "junk"),
                           response.vars=colnames(allelic), 
-                          ntree=nTree, trace=T)
+                          ntree=nTree, trace=F)
   
   gf.cumImp <- cumimp(gfMod, "P1", type="Species")
   
