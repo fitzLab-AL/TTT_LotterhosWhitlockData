@@ -85,7 +85,7 @@ gfR2tab <- function(gfMods.list, alFreqs){
               nrow(tab)/nrow(gfMods.list[[i]]))
   tab <- data.frame(variable=vrNm, tab)
   tab <- dcast(tab, SNP~variable, value.var="imps")
-  envR2 <- rowSums(tab[,-1])
+  envR2 <- rowSums(data.frame(tab[,-1]))
   R2Tab <- data.frame(tab, envR2=envR2)
   
   # get name of SNP if it has a positive R2
@@ -101,8 +101,8 @@ gfR2tab <- function(gfMods.list, alFreqs){
   noGF$SNP <- negR2
   
   R2Tab <- rbind(R2Tab, noGF)
-  snpID <- sapply(strsplit(as.character(R2Tab$SNP), "V"),function(x){as.numeric(x[2])})
-  R2Tab$SNP <- snpID
+  #snpID <- sapply(strsplit(as.character(R2Tab$SNP), "V"),function(x){as.numeric(x[2])})
+  #R2Tab$SNP <- snpID
   return(R2Tab[order(R2Tab$SNP),])}
 #####
 ################################################################################
@@ -117,6 +117,8 @@ simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
 simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function(x){
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
+
+#simID <- simIDs[2]
 
 # lapply through each simulation to prep data, run GF, and write results to file
 lapply(simIDs, function(simID){
@@ -136,7 +138,7 @@ lapply(simIDs, function(simID){
   allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
   #allelic <- allelic[,cpVal$SNPIncluded]
   
-  snpID <- paste("V", row.names(cpVal), sep="")
+  snpID <- cpVal$SNPnames#paste("V", row.names(cpVal), sep="")
   names(allelic) <- snpID
   
   print(paste("Minor allele freq", simID, sep="::"))
@@ -146,25 +148,40 @@ lapply(simIDs, function(simID){
   numPops <- nrow(bgEnv)
   
   # build env table for individuals
-  envInd <- NULL
-  for(i in 1:popSize){envInd <- rbind(envInd, bgEnv)}
+  datInd <- data.frame(envSelect=envSelect, allelic)
+  datPop <- aggregate(. ~ envSelect, data=datInd, FUN=function(x, popSize){
+    alCount <- sum(x)
+    if(alCount>10){
+      return(1-alCount/popSize)
+    } else{return(alCount/popSize)}}, popSize=popSize)
   
-  envInd <- envInd[sort(envInd$PopID),c(1:3,8:27)]
-  envInd <- data.frame(envInd, envSelect)
+  datPop <- aggregate(. ~ envSelect, data=datInd, FUN=function(x, popSize){
+    sum(x)/popSize}, popSize=popSize)
   
-  # build env table for populations 
-  envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
-                       envSelect=unique(envSelect), bgEnv[,8:27])
+  envInd <- envSelect
+  envPop <- data.frame(envSelect=datPop[,1])
+  allelic <- datInd[,-1]
+  alFreq <- datPop[,-1]
   
-  # Calculate minor allele frequencies
-  alFreq.x <- alleleDat(allelic, popSize, numPops)
-  alFreq <- alFreq.x[[1]] # minor allele frequencies
-  #alCount <- alFreq.x[[2]] # allele counts
-  rm(alFreq.x)
+  # envInd <- NULL
+  # for(i in 1:popSize){envInd <- rbind(envInd, bgEnv)}
+  # 
+  # envInd <- envInd[sort(envInd$PopID),c(1:3,8:27)]
+  # envInd <- data.frame(envInd, envSelect)
+  # 
+  # # build env table for populations 
+  # envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops, 
+  #                      envSelect=unique(envSelect), bgEnv[,8:27])
+  # 
+  # # Calculate minor allele frequencies
+  # alFreq.x <- alleleDat(allelic, popSize, numPops)
+  # alFreq <- alFreq.x[[1]] # minor allele frequencies
+  # #alCount <- alFreq.x[[2]] # allele counts
+  # rm(alFreq.x)
   
   # Minor allele frequencies using GF
   # fit gf model to each SNP individually
-  cl <- makeCluster(11)
+  cl <- makeCluster(12)
   registerDoParallel(cl)
   
   gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, 
@@ -172,7 +189,7 @@ lapply(simIDs, function(simID){
                              locus <- data.frame(alFreq[,k])
                              names(locus) <- colnames(alFreq)[k]
                              gfLocus <- gradientForest(data.frame(envPop, locus),
-                                                       predictor.vars=colnames(envPop)[-c(1:3)], 
+                                                       predictor.vars=colnames(envPop), 
                                                        response.vars=colnames(alFreq)[k], 
                                                        corr.threshold=0.5, ntree=500, trace=F)
                              if(!is.null(gfLocus)){
@@ -200,22 +217,22 @@ lapply(simIDs, function(simID){
   allelic <- apply(allelic, 2, factor)
   
   # fit individual GF models by locus.
-  cl <- makeCluster(11)
+  cl <- makeCluster(12)
   registerDoParallel(cl)
   
   gfAllele.pa <- foreach(k=1:ncol(allelic), .verbose=T, .packages=c("gradientForest")) %dopar%{
     locus <- data.frame(allelic[,k])
     names(locus) <- colnames(allelic)[k]
-    
-    gfLocus <- gradientForest(data.frame(envInd, locus),
-                              predictor.vars=colnames(envInd)[-c(1:3)], 
+    dummyEnv <- rep(0, length(locus))
+    modDat <- data.frame(envInd, dummyEnv, locus)
+    gfLocus <- gradientForest(modDat, predictor.vars=c("envSelect", "dummyEnv"), 
                               response.vars=colnames(allelic)[k], 
                               corr.threshold=0.5, ntree=500, trace=T)
     
     if(!is.null(gfLocus)){
       imps <- importance(gfLocus)
       imps <- imps[order(names(imps))]
-      data.frame(imps, SNP = colnames(alFreq)[k])
+      data.frame(imps, SNP = colnames(allelic)[k])
     }
   }
   
@@ -248,9 +265,10 @@ lapply(simIDs, function(simID){
                      locus <- data.frame(alFreq[,k])
                      names(locus) <- colnames(alFreq)[k]
                      gfLocus <- gradientForest(data.frame(envPop, locus),
-                                               predictor.vars="envSelect", 
+                                               predictor.vars=colnames(envPop), 
                                                response.vars=colnames(alFreq)[k], 
                                                corr.threshold=0.5, ntree=500, trace=F)
+                     
                      if(!is.null(gfLocus)){
                        cImp <- cumimp(gfLocus, "envSelect", type="Species")
                        data.frame(rbindlist(cImp, idcol="allele"))
@@ -261,9 +279,9 @@ lapply(simIDs, function(simID){
                   .packages=c("gradientForest", "data.table")) %dopar% {
                     locus <- data.frame(allelic[,k])
                     names(locus) <- colnames(allelic)[k]
-                    
-                    gfLocus <- gradientForest(data.frame(envInd, locus),
-                                              predictor.vars="envSelect", 
+                    dummyEnv <- rep(0, length(locus))
+                    modDat <- data.frame(envInd, dummyEnv, locus)
+                    gfLocus <- gradientForest(modDat, predictor.vars=c("envSelect", "dummyEnv"), 
                                               response.vars=colnames(allelic)[k], 
                                               corr.threshold=0.5, ntree=500, trace=T)
                     if(!is.null(gfLocus)){
@@ -292,12 +310,12 @@ lapply(simIDs, function(simID){
   # nnn <- data.frame(rbindlist(nnn, idcol="allele"))
   
   ggCand <- impDat #rbind(ttt, nnn)
-  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("V", row.names(cpVal), sep=""))])
+  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
   
   ggCand <- data.frame(ggCand, strSel)
   
   snpID[cpVal$IsNeut=="Sel"]
-  ggCand <- data.frame(ggCand, isNeut=as.character(cpVal$IsNeut[match(ggCand$allele, snpID)]))
+  ggCand <- data.frame(ggCand, isNeut=as.character(cpVal$IsNeut[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))]))
   
   #ggCand$colorSNP <- as.character(ggCand$colorSNP)
   #ggCand$colorSNP[ggCand$allele %in% paste("V", 9900:10000, sep="")] <- "red"
@@ -386,12 +404,12 @@ lapply(simIDs, function(simID){
   # nnn <- data.frame(rbindlist(nnn, idcol="allele"))
   
   ggCand <- impDat #rbind(ttt, nnn)
-  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("V", row.names(cpVal), sep=""))])
+  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
   
   ggCand <- data.frame(ggCand, strSel)
   
   snpID[cpVal$IsNeut=="Sel"]
-  ggCand <- data.frame(ggCand, isNeut=as.character(cpVal$IsNeut[match(ggCand$allele, snpID)]))
+  ggCand <- data.frame(ggCand, isNeut=as.character(cpVal$IsNeut[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))]))
   
   #ggCand$colorSNP <- as.character(ggCand$colorSNP)
   #ggCand$colorSNP[ggCand$allele %in% paste("V", 9900:10000, sep="")] <- "red"
