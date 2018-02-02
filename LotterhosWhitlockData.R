@@ -109,7 +109,7 @@ gfR2tab <- function(gfMods.list, alFreqs){
 
 
 # Load and prep data (env, allelic) ---------------------------------------
-cores <- 12
+cores <- 11
 
 # "background" environment
 bgEnv <- read.table(paste(getwd(),"/results_AdaptreeEnviFor_R90.txt", sep="")) 
@@ -325,7 +325,7 @@ simFiles <- list.files(path=paste(getwd(), "/simfiles", sep=""), full.names=T)
 simIDs <- unique(sapply(strsplit(sapply(strsplit(simFiles, "_NumPops"), function(x){
   x[1]}), "/simfiles/", fixed=T), function(x){
     x[2]}))
-simID <- simIDs[11]
+simID <- simIDs[1]
 
 gfAUC <- function(simID){
   
@@ -335,10 +335,14 @@ gfAUC <- function(simID){
   gfResult.freq <- read.csv(gfResults[grep("Freq", gfResults)])
   gfResult.pa <- read.csv(gfResults[grep("PresAbs", gfResults)])
   
-  Observed.freq <- c(rep(0, 9900), rep(1, (nrow(gfResult.freq)-9900)))
+  cpVal <- read.table(list.files(path=paste(getwd(), "/results", sep=""), 
+                                 pattern=simID, full.names=T), header=T)
+  cpVal <- subset(cpVal, UseSNP==TRUE)
+  
+  Observed.freq <- c(rep(0, max(which(cpVal$s_high==0))), rep(1, (nrow(gfResult.freq)-max(which(cpVal$s_high==0)))))
   Predicted.freq <- gfResult.freq$envR2
   
-  Observed.pa <- c(rep(0, 9900), rep(1, (nrow(gfResult.pa)-9900)))
+  Observed.pa <- c(rep(0, max(which(cpVal$s_high==0))), rep(1, (nrow(gfResult.pa)-max(which(cpVal$s_high==0)))))
   Predicted.pa <- gfResult.pa$envR2
   
   # Run the AUC calculations
