@@ -140,26 +140,27 @@ lapply(simIDs, function(simID){
   allelic <- fread(sim[grep("lfmm", sim)], header=F, data.table=F)
   #allelic <- allelic[,cpVal$SNPIncluded]
   
-  snpID <- cpVal$SNPnames#paste("V", row.names(cpVal), sep="")
+  snpID <- paste("S", row.names(cpVal), sep="")#paste("X", cpVal$SNPnames, sep="")
   names(allelic) <- snpID
   
   # data stats - used for indexing, etc
   popSize <- nrow(allelic)/nrow(bgEnv)
   numPops <- nrow(bgEnv)
   
+  popID <- sort(rep(1:numPops, popSize))
+  
   # build data tables for individuals & populations
-  datInd <- data.frame(envSelect=envSelect, allelic)
-  datInd <- datInd[order(datInd$envSelect),]
-  allelic <- datInd[,-1]
+  datInd <- data.frame(popID=popID, envSelect=envSelect, allelic)
   
-  datPop <- aggregate(. ~ envSelect, data=datInd, FUN=function(x, popSize){
+  datPop <- aggregate(. ~ popID+envSelect, data=datInd, FUN=function(x, popSize){
     sum(x)/popSize}, popSize=popSize)
-  alFreq <- datPop[,-1]
-  envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops,
-                         envSelect=unique(envSelect), bgEnv[,8:27])
-  envPop <- envPop[order(envPop$envSelect),]
+  alFreq <- datPop[,-c(1, 2)] #"popID", "envSelect"
+  # envPop <- data.frame(popID=bgEnv[,1], x=bgEnv$X_Pops, y=bgEnv$Y_Pops,
+  #                        envSelect=unique(envSelect), bgEnv[,8:27])
+  # envPop <- envPop[order(envPop$envSelect),]
   
-  envInd <- envPop[match(datInd$envSelect, envPop$envSelect),]
+  envPop <- data.frame(envSelect = datPop$envSelect)
+  #envInd <- envPop[match(datInd$envSelect, envPop$envSelect),]
   
   # Minor allele frequencies using GF
   # fit gf model to each SNP individually
@@ -168,11 +169,11 @@ lapply(simIDs, function(simID){
   registerDoParallel(cl)
   
   gfAllele.freq <- foreach(k=1:ncol(alFreq), .verbose=F, .packages=c("gradientForest", "data.table")) %dopar% {
-                             locus <- data.frame(alFreq[,k])
-                             names(locus) <- colnames(alFreq)[k]
+                            locus <- data.frame(alFreq[,k])
+                            names(locus) <- colnames(alFreq)[k]
                              
                             gfLocus <- gradientForest(data.frame(envPop, locus),
-                                                       predictor.vars=colnames(envPop)[-c(1:3, 7:24)], 
+                                                       predictor.vars=colnames(envPop), 
                                                        response.vars=colnames(alFreq)[k], 
                                                        corr.threshold=0.5, ntree=500, trace=F)
                              if(!is.null(gfLocus)){
@@ -189,6 +190,8 @@ lapply(simIDs, function(simID){
   # Allele presence-absence using GF
   # Need to change 0/1 to factor for classification (otherwise defaults to regression) 
   allelic <- apply(allelic, 2, factor)
+  dummyEnv <- runif(length(envSelect[,1]), -0.001, 0.001)
+  envInd <- data.frame(envSelect=envSelect, dummyEnv=dummyEnv)
   
   cl <- makeCluster(cores)
   registerDoParallel(cl)
@@ -198,7 +201,7 @@ lapply(simIDs, function(simID){
                             names(locus) <- colnames(allelic)[k]
     
                             gfLocus <- gradientForest(data.frame(envInd, locus),
-                                                      predictor.vars=colnames(envInd)[-c(1:3, 7:24)], 
+                                                      predictor.vars=colnames(envInd), 
                                                       response.vars=colnames(allelic)[k], 
                                                       corr.threshold=0.5, ntree=500, trace=F)
     
@@ -236,41 +239,6 @@ lapply(simIDs, function(simID){
   write.csv(gfAllele.R2.pa, paste(getwd(), "/gradientForestResults/gfResults_PresAbs_", simID, ".csv", sep=""), 
             row.names=F)
   
-  # cl <- makeCluster(cores)
-  # registerDoParallel(cl)
-  # 
-  # gfMAF <- foreach(k=1:ncol(alFreq), .verbose=F, 
-  #                  .packages=c("gradientForest", "data.table")) %dopar% {
-  #                    locus <- data.frame(alFreq[,k])
-  #                    names(locus) <- colnames(alFreq)[k]
-  #                    gfLocus <- gradientForest(data.frame(envPop, locus),
-  #                                              predictor.vars="envSelect", 
-  #                                              response.vars=colnames(alFreq)[k], 
-  #                                              corr.threshold=0.5, ntree=500, trace=F)
-  #                    if(!is.null(gfLocus)){
-  #                      cImp <- cumimp(gfLocus, "envSelect", type="Species")
-  #                      data.frame(rbindlist(cImp, idcol="allele"))
-  #                    }
-  #                  }
-  # 
-  # gfPA <- foreach(k=1:ncol(alFreq), .verbose=F, 
-  #                 .packages=c("gradientForest", "data.table")) %dopar% {
-  #                   locus <- data.frame(allelic[,k])
-  #                   names(locus) <- colnames(allelic)[k]
-  #                   
-  #                   gfLocus <- gradientForest(data.frame(envInd, locus),
-  #                                             predictor.vars="envSelect", 
-  #                                             response.vars=colnames(allelic)[k], 
-  #                                             corr.threshold=0.5, ntree=500, trace=F)
-  #                   if(!is.null(gfLocus)){
-  #                     cImp <- cumimp(gfLocus, "envSelect", type="Species")
-  #                     data.frame(rbindlist(cImp, idcol="allele"))
-  #                   }
-  #                 }
-  # 
-  # stopCluster(cl)
-  
-  
   ##### plot cImp for MAF models #####
   impDatList <- gfAllele.freq[unlist(lapply(gfAllele.freq, function(x){!is.null(x)}))]
   impDat <- do.call(rbind, impDatList)
@@ -278,7 +246,7 @@ lapply(simIDs, function(simID){
   x <- sort(unique(envSelect)[,1])
   
   ggCand <- impDat 
-  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
+  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("S", row.names(cpVal), sep=""))])
   
   ggCand <- data.frame(ggCand, strSel)
   
@@ -305,8 +273,8 @@ lapply(simIDs, function(simID){
           axis.title.y = element_text(size=24, vjust=1)) + 
     theme(strip.text = element_text(size=16))
   
-  ggsave(paste(getwd(), "/gradientForestResults/facetMAF_cImp_", simID, ".pdf", sep=""), 
-         width = 16, height = 10, units = "in", dpi=300, p.imp)
+  ggsave(paste(getwd(), "/gradientForestResults/facetMAF_cImp_", simID, ".png", sep=""), 
+         device="png", width = 16, height = 10, units = "in", dpi=300, p.imp)
   
   ##### plot cImp for PAF models #####
   impDatList <- gfAllele.pa[unlist(lapply(gfAllele.pa, function(x){!is.null(x)}))]
@@ -315,7 +283,7 @@ lapply(simIDs, function(simID){
   x <- sort(unique(envSelect)[,1])
   
   ggCand <- impDat #rbind(ttt, nnn)
-  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("X", cpVal$SNPnames, sep=""))])
+  strSel <- factor(cpVal$s_high[match(ggCand$allele, paste("S", row.names(cpVal), sep=""))])
   
   ggCand <- data.frame(ggCand, strSel)
   
@@ -345,8 +313,8 @@ lapply(simIDs, function(simID){
           axis.title.y = element_text(size=24, vjust=1)) + 
     theme(strip.text = element_text(size=16))
   
-  ggsave(paste(getwd(), "/gradientForestResults/facetPA_cImp_", simID, ".pdf", sep=""), 
-                 width = 16, height = 10, units = "in", dpi=300, p.imp)
+  ggsave(paste(getwd(), "/gradientForestResults/facetPA_cImp_", simID, ".png", sep=""), 
+                 device="png", width = 16, height = 10, units = "in", dpi=300, p.imp)
 })
 ################################################################################
 
